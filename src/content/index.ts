@@ -33,6 +33,7 @@ class SlackScraper {
   private channels: SlackChannel[] = [];
   private users: SlackUser[] = [];
   private blacklist: string[] = [];
+  private lastMessagedUser: string = ''; // Track the last messaged user for resume logic
 
   // Utility function to wait for an element to appear in the DOM
   private async waitForElement(selector: string, timeout = 100000, interval = 250): Promise<HTMLElement | null> {
@@ -47,6 +48,30 @@ class SlackScraper {
           }, 3000);
         } else if (Date.now() - startTime > timeout) {
           clearInterval(check);
+          resolve(null);
+        }
+      }, interval);
+    });
+  }
+
+  // Utility function to wait for an element to be enabled (aria-disabled !== 'true')
+  private async waitForElementEnabled(selector: string, timeout = 100000, interval = 250): Promise<HTMLElement | null> {
+    const startTime = Date.now();
+    return new Promise((resolve) => {
+      const check = setInterval(() => {
+        const element = document.querySelector(selector) as HTMLElement;
+        if (element) {
+          const isDisabled = element.getAttribute('aria-disabled') === 'true';
+          if (!isDisabled) {
+            clearInterval(check);
+            setTimeout(() => {
+              resolve(element);
+            }, 500);
+          }
+        }
+        if (Date.now() - startTime > timeout) {
+          clearInterval(check);
+          logger.warn(`Element enabled not found or still disabled after ${timeout}ms: ${selector}`);
           resolve(null);
         }
       }, interval);
@@ -166,17 +191,31 @@ class SlackScraper {
     });
   }
 
-  private async messageAllUsersInPage(messageContent: string) {
+  private async messageAllUsersInPage(messageContent: string, skipUntilLastUser: boolean = false) {
     try {
       this.sendClickStatus('Starting to message all users...');
+
+      // Ensure sort is set to "A to Z" before starting
+      await this.ensureSortIsAtoZ();
+
       const userCells = document.getElementsByClassName("p-explorer_grid__cell");
       if (userCells.length === 0) {
         this.sendClickStatus('No users found on this page.');
         logger.warn('No users found on this page.');
         return;
       }
+      logger.log(`Start scrapping for ${userCells.length} users`);
+      let shouldSkip = skipUntilLastUser;
+      if (shouldSkip) {
+        logger.log(`Skipping users until we find last messaged user: "${this.lastMessagedUser}"`);
+        this.sendClickStatus(`Resuming from: ${this.lastMessagedUser}`);
+      }
 
       for (let i = 0; i < userCells.length; i += 1) {
+        // Periodically check if sort has reset (every 5 users)
+        if (i % 5 === 0) {
+          await this.ensureSortIsAtoZ();
+        }
         const userCell = userCells[i] as HTMLElement;
         this.sendClickStatus(`Messaging user ${i + 1} of ${userCells.length}...`);
         logger.log(`Clicking user ${i + 1}:`, userCell);
@@ -191,15 +230,71 @@ class SlackScraper {
           logger.log('Clicking Message button:', messageButton);
           messageButton.click();
 
-          // Wait for DM page to load and ql-editor to appear
-          const qlEditor = await this.waitForElement(".ql-editor");
-          if (qlEditor) {
-            // check name
-            const memberName = (document.querySelector('[data-qa="member_name"]') as HTMLElement).textContent?.trim();
+          // Wait for DM page to load and message input to appear
+          const messageInputDiv = await this.waitForElement('[data-qa="message_input"]');
+          if (!messageInputDiv) {
+            logger.warn('Message input container not found on DM page.');
+            this.sendClickStatus(`Error: message_input not found for user ${i + 1}.`);
+            history.back();
+            await this.waitForElement(".p-explorer_grid__cell");
+            continue;
+          }
+
+          logger.log('Found message_input container, looking for ql-editor...');
+          const qlEditor = messageInputDiv.querySelector(".ql-editor") as HTMLElement;
+
+          if (!qlEditor) {
+            logger.warn('ql-editor not found inside message_input container.');
+            this.sendClickStatus(`Error: ql-editor not found for user ${i + 1}.`);
+            history.back();
+            await this.waitForElement(".p-explorer_grid__cell");
+            continue;
+          }
+
+          try {
+            // check name - safely get member name with null checking
+            const memberNameElement = document.querySelector('[data-qa="member_name"]') as HTMLElement | null;
+            if (!memberNameElement) {
+              logger.warn('Member name element not found on DM page');
+              this.sendClickStatus(`Error: member_name element not found for user ${i + 1}.`);
+              history.back();
+              await this.waitForElement(".p-explorer_grid__cell");
+              continue;
+            }
+
+            const memberName = memberNameElement.textContent?.trim();
+            if (!memberName) {
+              logger.warn('Member name is empty or null');
+              this.sendClickStatus(`Error: member name is empty for user ${i + 1}.`);
+              history.back();
+              await this.waitForElement(".p-explorer_grid__cell");
+              continue;
+            }
+
             logger.log(`===== USER NAME: "${memberName}" =====`);
+
+            // Check if we've reached the last messaged user when resuming
+            if (shouldSkip && memberName.toLowerCase() === this.lastMessagedUser.toLowerCase()) {
+              logger.log(`Found last messaged user: "${memberName}", resuming messaging...`);
+              this.sendClickStatus(`Found last messaged user: ${memberName}, resuming...`);
+              shouldSkip = false; // Resume messaging from next user
+              history.back();
+              await this.waitForElement(".p-explorer_grid__cell");
+              continue; // Skip this user, start messaging from next one
+            }
+
+            // Skip messaging if we haven't found the last messaged user yet
+            if (shouldSkip) {
+              logger.log(`Skipping user "${memberName}" - still looking for last messaged user "${this.lastMessagedUser}"`);
+              history.back();
+              await this.waitForElement(".p-explorer_grid__cell");
+              continue;
+            }
+
             logger.log(`BLACKLIST USERS:`, this.blacklist);
-            const isBlacklisted = this.blacklist.includes(memberName?.toLowerCase());
+            const isBlacklisted = this.blacklist.includes(memberName.toLowerCase());
             logger.log(`Is "${memberName}" blacklisted? ${isBlacklisted}`);
+
             if (regex.test(memberName) && !isBlacklisted) {
               logger.log('Found ql-editor, pasting message...');
               qlEditor.focus(); // Focus the editor to ensure it's ready for input
@@ -209,7 +304,6 @@ class SlackScraper {
               const sendButton = await this.waitForElement(".c-wysiwyg_container__button--send");
               if (sendButton) {
                 logger.log('Clicking send button:', sendButton);
-                // sendButton.click();
                 sendButton.click();
                 await new Promise(resolve => setTimeout(resolve, 1000)); // Still need a short wait on DM page
                 logger.log('Navigating back...');
@@ -221,14 +315,19 @@ class SlackScraper {
                 await this.waitForElement(".p-explorer_grid__cell"); // Wait for user list to reappear
               } else {
                 logger.warn('send button not found on DM page.');
+                history.back();
+                await this.waitForElement(".p-explorer_grid__cell");
               }
             } else {
+              logger.log('User is blacklisted or name regex test failed, skipping...');
               history.back();
               await this.waitForElement(".p-explorer_grid__cell"); // Wait for user list to reappear
             }
-          } else {
-            logger.warn('ql-editor not found on DM page.');
-            this.sendClickStatus(`Error: ql-editor not found for user ${i + 1}.`);
+          } catch (error) {
+            logger.error('Error processing user message:', error);
+            this.sendClickStatus(`Error processing user ${i + 1}: ${(error as Error).message}`);
+            history.back();
+            await this.waitForElement(".p-explorer_grid__cell");
           }
         } else {
           logger.warn('"Message" button not found for user.');
@@ -242,19 +341,45 @@ class SlackScraper {
       this.sendClickStatus('Finished messaging all users on this page.');
       logger.log('Finished messaging all users on this page.');
 
-      // Check for next page button and paginate
-      const nextPageButton = document.querySelector('[data-qa="c-pagination_forward_btn"]') as HTMLElement;
-      // Check if button exists and is not disabled (aria-disabled attribute is 'false' or not present)
-      const isDisabled = nextPageButton?.getAttribute('aria-disabled') === 'true';
-      if (nextPageButton && !isDisabled) {
+      // Check for next page button and paginate - wait until it's enabled
+      logger.log('Waiting for next page button to be enabled...');
+      let nextPageButton = await this.waitForElementEnabled('[data-qa="c-pagination_forward_btn"]', 10000); // Wait up to 10 seconds for button to be enabled
+
+      // If button not found, check if sort changed and fix it, then retry
+      if (!nextPageButton) {
+        logger.log('Next page button not found. Checking if sort changed...');
+        this.sendClickStatus('Next button not found, checking sort order...');
+
+        // Check and ensure sort is "A to Z"
+        const sortButton = document.getElementById('sort-explorer-select') as HTMLElement;
+        if (sortButton) {
+          const sortStatusSpan = sortButton.querySelector('span') as HTMLElement;
+          const currentSort = sortStatusSpan?.textContent?.trim() || '';
+          logger.log(`Current sort: "${currentSort}"`);
+
+          if (currentSort !== 'A to Z') {
+            logger.log('Sort is not "A to Z", fixing it...');
+            this.sendClickStatus('Fixing sort order...');
+            await this.ensureSortIsAtoZ();
+
+            // Retry finding the next page button after fixing sort
+            logger.log('Retrying to find next page button after sort fix...');
+            nextPageButton = await this.waitForElementEnabled('[data-qa="c-pagination_forward_btn"]', 10000);
+          }
+        }
+      }
+
+      if (nextPageButton) {
         this.sendClickStatus('Navigating to next page...');
         logger.log('Clicking next page button:', nextPageButton);
         nextPageButton.click();
         await this.waitForElement(".p-explorer_grid__cell"); // Wait for new page's user list to load
-        this.messageAllUsersInPage(messageContent); // Recursively call for the next page
+        await this.ensureSortIsAtoZ(); // Ensure sort is maintained after pagination
+        // Resume from last messaged user when continuing to next page
+        this.messageAllUsersInPage(messageContent, true);
       } else {
-        this.sendClickStatus('No more pages or next page button is disabled. Messaging completed!');
-        logger.log('No more pages or next page button is disabled. Messaging completed!');
+        this.sendClickStatus('No more pages or next button not enabled. Messaging completed!');
+        logger.log('No more pages or next button not enabled. Messaging completed!');
       }
 
     } catch (error) {
@@ -325,14 +450,71 @@ class SlackScraper {
   }
 
   private notifyUserMessaged(userName: string) {
+    // Track the last messaged user for resume logic
+    this.lastMessagedUser = userName;
+
     const serverNameElement = document.querySelector('.p-ia4_home_header_menu__team_name span');
     const serverName = serverNameElement?.textContent?.trim() || 'Unknown Server';
-    chrome.runtime.sendMessage({
+    const message = {
       action: 'userMessaged',
       userName,
       serverName,
       workspaceUrl: window.location.origin
-    });
+    };
+    logger.log('Sending userMessaged notification:', message);
+    try {
+      chrome.runtime.sendMessage(message, (response) => {
+        if (chrome.runtime.lastError) {
+          logger.error('Error sending userMessaged message:', chrome.runtime.lastError);
+        } else {
+          logger.log('userMessaged message sent successfully, response:', response);
+        }
+      });
+    } catch (error) {
+      logger.error('Exception sending userMessaged message:', error);
+    }
+  }
+
+  private async ensureSortIsAtoZ() {
+    try {
+      const sortButton = document.getElementById('sort-explorer-select') as HTMLElement;
+      if (!sortButton) {
+        logger.warn('Sort button not found');
+        return;
+      }
+
+      // Get the first span child which contains the sort status
+      const sortStatusSpan = sortButton.querySelector('span') as HTMLElement;
+      const currentSort = sortStatusSpan?.textContent?.trim() || '';
+
+      logger.log(`Current sort status: "${currentSort}"`);
+
+      // Check if it's already "A to Z"
+      if (currentSort === 'A to Z') {
+        logger.log('Sort is already set to "A to Z", no need to change');
+        return;
+      }
+
+      logger.log('Sort is not "A to Z", updating to "A to Z"...');
+
+      // Click the sort button to open the dropdown
+      sortButton.click();
+      await new Promise(resolve => setTimeout(resolve, 500)); // Wait for dropdown to appear
+
+      // Click the "A to Z" option (option_1)
+      const sortOption = document.getElementById('sort-explorer-select_option_1') as HTMLElement;
+      if (sortOption) {
+        logger.log('Clicking "A to Z" sort option');
+        sortOption.click();
+        logger.log('Waiting for user list to re-sort...');
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for list to re-sort and render
+        logger.log('Sort updated to "A to Z", user list is ready');
+      } else {
+        logger.warn('"A to Z" sort option not found');
+      }
+    } catch (error) {
+      logger.error('Error ensuring sort is A to Z:', error);
+    }
   }
 
 

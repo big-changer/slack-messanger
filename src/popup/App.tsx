@@ -12,11 +12,15 @@ const App: React.FC = () => {
   useEffect(() => {
     const currentUrl = window.location.origin;
 
-    // Load last messaged users and blacklist from Chrome storage
-    chrome.storage.local.get(['lastMessagedUsers', 'blacklistText'], (result) => {
+    // Load last messaged users, message content, and blacklist from Chrome storage
+    chrome.storage.local.get(['lastMessagedUsers', 'blacklistText', 'messageContent'], (result) => {
       if (result.lastMessagedUsers) {
         const lastUser = result.lastMessagedUsers[currentUrl] || '';
         setLastMessagedUser(lastUser);
+      }
+      // Load message content
+      if (result.messageContent && typeof result.messageContent === 'string') {
+        setMessageContent(result.messageContent);
       }
       // Load new format (plain text comma-separated)
       if (result.blacklistText && typeof result.blacklistText === 'string') {
@@ -31,16 +35,30 @@ const App: React.FC = () => {
 
     // Listen for user messaged updates from the content script
     const messageListener = (message: any, sender: chrome.runtime.MessageSender, sendResponse: (response?: any) => void) => {
+      console.log('Popup received message:', message, 'from sender:', sender);
       if (message.action === 'userMessaged') {
+        console.log('Updating last messaged user to:', message.userName);
         // Update the last messaged user when a user is messaged
         setLastMessagedUser(message.userName);
         setServerName(message.serverName || '');
         setWorkspaceUrl(message.workspaceUrl || '');
 
         chrome.storage.local.get(['lastMessagedUsers'], (result) => {
-          const lastMessagedUsers = result.lastMessagedUsers || {};
-          lastMessagedUsers[currentUrl] = message.userName;
-          chrome.storage.local.set({ lastMessagedUsers });
+          if (chrome.runtime.lastError) {
+            console.error('Error getting lastMessagedUsers from storage:', chrome.runtime.lastError);
+          } else {
+            console.log('Got lastMessagedUsers from storage:', result.lastMessagedUsers);
+            const lastMessagedUsers = result.lastMessagedUsers || {};
+            lastMessagedUsers[currentUrl] = message.userName;
+            console.log('Setting lastMessagedUsers:', lastMessagedUsers);
+            chrome.storage.local.set({ lastMessagedUsers }, () => {
+              if (chrome.runtime.lastError) {
+                console.error('Error setting lastMessagedUsers in storage:', chrome.runtime.lastError);
+              } else {
+                console.log('Successfully saved lastMessagedUsers to storage');
+              }
+            });
+          }
         });
       }
       sendResponse();
@@ -53,10 +71,43 @@ const App: React.FC = () => {
     };
   }, []);
 
+  // Persist message content to storage whenever it changes
+  useEffect(() => {
+    chrome.storage.local.set({ messageContent });
+  }, [messageContent]);
+
   const handleMessageAllUsers = async () => {
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (tab.id) {
-      chrome.tabs.sendMessage(tab.id, { action: 'messageAllUsers', content: messageContent });
+    // Query all tabs to find Slack instances
+    const allTabs = await chrome.tabs.query({});
+    const slackTabs = allTabs.filter(tab => tab.url && tab.url.includes('slack.com'));
+
+    if (slackTabs.length === 0) {
+      alert('No Slack tabs found. Please open at least one Slack workspace.');
+      return;
+    }
+
+    // Send message to all Slack tabs in parallel
+    const promises = slackTabs.map(tab =>
+      new Promise((resolve) => {
+        if (tab.id) {
+          chrome.tabs.sendMessage(
+            tab.id,
+            { action: 'messageAllUsers', content: messageContent },
+            (response) => {
+              resolve({ tabId: tab.id, url: tab.url, response });
+            }
+          );
+        }
+      })
+    );
+
+    try {
+      const results = await Promise.all(promises);
+      console.log('Messaging started on all Slack tabs:', results);
+      alert(`Started messaging on ${slackTabs.length} Slack workspace(s)`);
+    } catch (error) {
+      console.error('Error sending messages to tabs:', error);
+      alert('Error starting messaging on some Slack tabs');
     }
   };
 
