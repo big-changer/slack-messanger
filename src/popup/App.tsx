@@ -8,12 +8,13 @@ const App: React.FC = () => {
   const [workspaceUrl, setWorkspaceUrl] = useState<string>("");
   const [blacklist, setBlacklist] = useState<string[]>([]);
   const [blacklistText, setBlacklistText] = useState<string>("");
+  const [isPaused, setIsPaused] = useState<boolean>(false);
 
   useEffect(() => {
     const currentUrl = window.location.origin;
 
-    // Load last messaged users, message content, and blacklist from Chrome storage
-    chrome.storage.local.get(['lastMessagedUsers', 'blacklistText', 'messageContent'], (result) => {
+    // Load last messaged users, message content, blacklist, and pause state from Chrome storage
+    chrome.storage.local.get(['lastMessagedUsers', 'blacklistText', 'messageContent', 'isPaused'], (result) => {
       if (result.lastMessagedUsers) {
         const lastUser = result.lastMessagedUsers[currentUrl] || '';
         setLastMessagedUser(lastUser);
@@ -30,6 +31,10 @@ const App: React.FC = () => {
           .filter(name => name.length > 0);
         setBlacklist(blacklistArray);
         setBlacklistText(result.blacklistText);
+      }
+      // Load pause state
+      if (typeof result.isPaused === 'boolean') {
+        setIsPaused(result.isPaused);
       }
     });
 
@@ -109,6 +114,30 @@ const App: React.FC = () => {
       console.error('Error sending messages to tabs:', error);
       alert('Error starting messaging on some Slack tabs');
     }
+  };
+
+  const handlePauseResume = () => {
+    const newPausedState = !isPaused;
+    setIsPaused(newPausedState);
+
+    // Save pause state to storage
+    chrome.storage.local.set({ isPaused: newPausedState }, () => {
+      console.log(`Messaging ${newPausedState ? 'paused' : 'resumed'}`);
+    });
+
+    // Notify all Slack tabs about pause state
+    chrome.tabs.query({ url: '*://app.slack.com/*' }, (tabs) => {
+      tabs.forEach(tab => {
+        if (tab.id) {
+          chrome.tabs.sendMessage(tab.id, {
+            action: 'togglePause',
+            isPaused: newPausedState
+          }).catch(() => {
+            // Tab might not be ready, ignore error
+          });
+        }
+      });
+    });
   };
 
   const updateBlacklistFromText = () => {
@@ -195,9 +224,14 @@ const App: React.FC = () => {
             />
           </div>
 
-          <button className="action-btn message-all-btn" onClick={handleMessageAllUsers}>
-            Send All Messages
-          </button>
+          <div className="button-group">
+            <button className="action-btn message-all-btn" onClick={handleMessageAllUsers}>
+              Send All Messages
+            </button>
+            <button className={`action-btn pause-resume-btn ${isPaused ? 'resumed' : 'paused'}`} onClick={handlePauseResume}>
+              {isPaused ? 'Resume' : 'Pause'}
+            </button>
+          </div>
         </div>
 
         <div className="blacklist-section">

@@ -331,3 +331,43 @@
   background: #229547;
   transform: translateY(-1px);
 }
+
+.button-group {
+  display: flex;
+  gap: 10px;
+  width: 100%;
+}
+
+.message-all-btn {
+  flex: 2;
+}
+
+.pause-resume-btn {
+  flex: 1;
+  padding: 10px 14px;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.2s ease;
+}
+
+.pause-resume-btn.paused {
+  background: #e01e5a;
+}
+
+.pause-resume-btn.paused:hover {
+  background: #c01649;
+  transform: translateY(-1px);
+}
+
+.pause-resume-btn.resumed {
+  background: #f97316;
+}
+
+.pause-resume-btn.resumed:hover {
+  background: #ea580c;
+  transform: translateY(-1px);
+}

@@ -1,10 +1,18 @@
 // Content script for Slack scraping
 
-// Custom logger for easy filtering
+// Custom logger with timestamps for easy filtering and debugging
 const logger = {
-  log: (...args: any[]): void => console.log('EXT:DEBUG', ...args),
-  warn: (...args: any[]): void => console.warn('EXT:DEBUG', ...args),
-  error: (...args: any[]): void => console.error('EXT:DEBUG', ...args),
+  getTimestamp: (): string => {
+    const now = new Date();
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
+    const ms = String(now.getMilliseconds()).padStart(3, '0');
+    return `[${hours}:${minutes}:${seconds}.${ms}]`;
+  },
+  log: (...args: any[]): void => console.log(`EXT:DEBUG ${logger.getTimestamp()}`, ...args),
+  warn: (...args: any[]): void => console.warn(`EXT:DEBUG ${logger.getTimestamp()}`, ...args),
+  error: (...args: any[]): void => console.error(`EXT:DEBUG ${logger.getTimestamp()}`, ...args),
 };
 
 interface SlackMessage {
@@ -33,7 +41,7 @@ class SlackScraper {
   private channels: SlackChannel[] = [];
   private users: SlackUser[] = [];
   private blacklist: string[] = [];
-  private lastMessagedUser: string = ''; // Track the last messaged user for resume logic
+  private isPaused: boolean = false;
 
   // Utility function to wait for an element to appear in the DOM
   private async waitForElement(selector: string, timeout = 100000, interval = 250): Promise<HTMLElement | null> {
@@ -82,6 +90,7 @@ class SlackScraper {
     this.setupMessageListener();
     this.loadState();
     this.loadBlacklist();
+    this.loadPauseState();
     // Listen for blacklist updates from storage
     chrome.storage.onChanged.addListener((changes) => {
       try {
@@ -172,6 +181,19 @@ class SlackScraper {
     }
   }
 
+  private async loadPauseState() {
+    try {
+      const result = await chrome.storage.local.get(['isPaused']);
+      if (typeof result.isPaused === 'boolean') {
+        this.isPaused = result.isPaused;
+        logger.log(`Loaded pause state: ${this.isPaused}`);
+      }
+    } catch (error) {
+      logger.error('Error loading pause state:', error);
+      this.isPaused = false;
+    }
+  }
+
   private setupMessageListener() {
     chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       if (message.action === 'startScraping') {
@@ -187,12 +209,55 @@ class SlackScraper {
         const messageContent = message.content || ""; // Get message content from popup
         this.messageAllUsersInPage(messageContent);
         sendResponse({ success: true });
+      } else if (message.action === 'keepalive') {
+        // Keepalive ping from background script - helps keep extension active and responsive
+        logger.log('Received keepalive ping from background script');
+
+        // Update the background script that this tab is alive
+        chrome.storage.local.get(['activeMessagingTab'], (result) => {
+          if (result.activeMessagingTab) {
+            // We're supposed to be messaging, make sure we're responsive
+            logger.log('Tab is active for messaging');
+          }
+        });
+
+        sendResponse({ success: true });
+      } else if (message.action === 'nudgeMessaging') {
+        // Nudge from background script to continue messaging despite throttling
+        logger.log('Received nudge to continue messaging');
+        sendResponse({ success: true });
+      } else if (message.action === 'togglePause') {
+        this.isPaused = message.isPaused;
+        logger.log(`Messaging ${this.isPaused ? 'paused' : 'resumed'}`);
+        sendResponse({ success: true });
+      }
+    });
+
+    // Listen for visibility changes to handle tab going inactive/active
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) {
+        logger.log('Tab is now hidden/inactive');
+        // Clear active messaging tab when hidden
+        chrome.storage.local.remove(['activeMessagingTab']);
+      } else {
+        logger.log('Tab is now visible/active - checking sort order...');
+        // Check and fix sort order when tab becomes visible
+        this.ensureSortIsAtoZ().catch(error => {
+          logger.error('Error checking sort on visibility change:', error);
+        });
       }
     });
   }
 
-  private async messageAllUsersInPage(messageContent: string, skipUntilLastUser: boolean = false) {
+  private async messageAllUsersInPage(messageContent: string) {
     try {
+      // Mark this tab as actively messaging so background script can keep it awake
+      const tabId = await this.getTabId();
+      if (tabId) {
+        chrome.storage.local.set({ activeMessagingTab: tabId });
+        logger.log(`Tab ${tabId} marked as actively messaging`);
+      }
+
       this.sendClickStatus('Starting to message all users...');
 
       // Ensure sort is set to "A to Z" before starting
@@ -205,13 +270,14 @@ class SlackScraper {
         return;
       }
       logger.log(`Start scrapping for ${userCells.length} users`);
-      let shouldSkip = skipUntilLastUser;
-      if (shouldSkip) {
-        logger.log(`Skipping users until we find last messaged user: "${this.lastMessagedUser}"`);
-        this.sendClickStatus(`Resuming from: ${this.lastMessagedUser}`);
-      }
 
       for (let i = 0; i < userCells.length; i += 1) {
+        // Check if paused - wait until resumed
+        while (this.isPaused) {
+          this.sendClickStatus(`Paused. Waiting to resume...`);
+          await new Promise(resolve => setTimeout(resolve, 1000)); // Check pause state every second
+        }
+
         // Periodically check if sort has reset (every 5 users)
         if (i % 5 === 0) {
           await this.ensureSortIsAtoZ();
@@ -273,24 +339,6 @@ class SlackScraper {
 
             logger.log(`===== USER NAME: "${memberName}" =====`);
 
-            // Check if we've reached the last messaged user when resuming
-            if (shouldSkip && memberName.toLowerCase() === this.lastMessagedUser.toLowerCase()) {
-              logger.log(`Found last messaged user: "${memberName}", resuming messaging...`);
-              this.sendClickStatus(`Found last messaged user: ${memberName}, resuming...`);
-              shouldSkip = false; // Resume messaging from next user
-              history.back();
-              await this.waitForElement(".p-explorer_grid__cell");
-              continue; // Skip this user, start messaging from next one
-            }
-
-            // Skip messaging if we haven't found the last messaged user yet
-            if (shouldSkip) {
-              logger.log(`Skipping user "${memberName}" - still looking for last messaged user "${this.lastMessagedUser}"`);
-              history.back();
-              await this.waitForElement(".p-explorer_grid__cell");
-              continue;
-            }
-
             logger.log(`BLACKLIST USERS:`, this.blacklist);
             const isBlacklisted = this.blacklist.includes(memberName.toLowerCase());
             logger.log(`Is "${memberName}" blacklisted? ${isBlacklisted}`);
@@ -307,9 +355,6 @@ class SlackScraper {
                 sendButton.click();
                 await new Promise(resolve => setTimeout(resolve, 1000)); // Still need a short wait on DM page
                 logger.log('Navigating back...');
-
-                // Track the last messaged user
-                this.notifyUserMessaged(memberName);
 
                 history.back();
                 await this.waitForElement(".p-explorer_grid__cell"); // Wait for user list to reappear
@@ -375,16 +420,20 @@ class SlackScraper {
         nextPageButton.click();
         await this.waitForElement(".p-explorer_grid__cell"); // Wait for new page's user list to load
         await this.ensureSortIsAtoZ(); // Ensure sort is maintained after pagination
-        // Resume from last messaged user when continuing to next page
-        this.messageAllUsersInPage(messageContent, true);
+        // Continue messaging on next page
+        this.messageAllUsersInPage(messageContent);
       } else {
         this.sendClickStatus('No more pages or next button not enabled. Messaging completed!');
         logger.log('No more pages or next button not enabled. Messaging completed!');
+        // Clear active messaging flag when done
+        chrome.storage.local.remove(['activeMessagingTab']);
       }
 
     } catch (error) {
       logger.error('Error messaging all users:', error);
       this.sendClickStatus(`Error during messaging: ${(error as Error).message}`);
+      // Clear active messaging flag on error
+      chrome.storage.local.remove(['activeMessagingTab']);
     }
   }
 
@@ -449,30 +498,13 @@ class SlackScraper {
     chrome.runtime.sendMessage({ action: 'updateClickStatus', status });
   }
 
-  private notifyUserMessaged(userName: string) {
-    // Track the last messaged user for resume logic
-    this.lastMessagedUser = userName;
-
-    const serverNameElement = document.querySelector('.p-ia4_home_header_menu__team_name span');
-    const serverName = serverNameElement?.textContent?.trim() || 'Unknown Server';
-    const message = {
-      action: 'userMessaged',
-      userName,
-      serverName,
-      workspaceUrl: window.location.origin
-    };
-    logger.log('Sending userMessaged notification:', message);
-    try {
-      chrome.runtime.sendMessage(message, (response) => {
-        if (chrome.runtime.lastError) {
-          logger.error('Error sending userMessaged message:', chrome.runtime.lastError);
-        } else {
-          logger.log('userMessaged message sent successfully, response:', response);
-        }
+  // Helper method to get current tab ID
+  private async getTabId(): Promise<number | undefined> {
+    return new Promise((resolve) => {
+      chrome.runtime.sendMessage({ action: 'getTabId' }, (response) => {
+        resolve(response?.tabId);
       });
-    } catch (error) {
-      logger.error('Exception sending userMessaged message:', error);
-    }
+    });
   }
 
   private async ensureSortIsAtoZ() {
