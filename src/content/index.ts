@@ -86,6 +86,59 @@ class SlackScraper {
     });
   }
 
+  // Check if there are existing messages in the current DM conversation
+  private async checkForExistingMessages(): Promise<boolean> {
+    // Wait a bit for messages to load
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    // Check page text first — most reliable for empty conversations
+    const pageText = document.body.innerText.toLowerCase();
+    if (pageText.includes('this is the very beginning') ||
+      pageText.includes('this conversation is just between') ||
+      pageText.includes('no messages yet')) {
+      logger.log('Found empty conversation text indicator');
+      return false;
+    }
+
+    // Check for empty state elements
+    const emptyStateSelectors = [
+      '.p-message_pane_empty_state',
+      '[data-qa="empty_state"]',
+      '.c-empty_state',
+      '.p-message_pane__no_messages'
+    ];
+
+    for (const selector of emptyStateSelectors) {
+      const emptyState = document.querySelector(selector);
+      if (emptyState) {
+        logger.log('Found empty state indicator - no existing messages');
+        return false;
+      }
+    }
+
+    // Scope message checks to the message pane only (avoid matching sidebar elements)
+    const messagePane = document.querySelector('.p-message_pane, [data-qa="message_pane"]');
+    if (messagePane) {
+      const messages = messagePane.querySelectorAll(
+        '[data-qa="message_container"], [data-qa="virtual-list-item"]'
+      );
+
+      if (messages.length > 0) {
+        logger.log(`Found ${messages.length} existing messages in conversation`);
+        return true;
+      }
+
+      const messageTimestamps = messagePane.querySelectorAll('[data-qa="message_timestamp"]');
+      if (messageTimestamps.length > 0) {
+        logger.log(`Found ${messageTimestamps.length} message timestamps - messages exist`);
+        return true;
+      }
+    }
+
+    logger.log('No clear indicators found - assuming empty conversation (safer default)');
+    return false;
+  }
+
   constructor() {
     this.setupMessageListener();
     this.loadState();
@@ -99,8 +152,8 @@ class SlackScraper {
           const blacklistText = changes.blacklistText.newValue || '';
           this.blacklist = blacklistText
             .split(',')
-            .map(name => name.trim().toLowerCase())
-            .filter(name => name.length > 0);
+            .map((name: string) => name.trim().toLowerCase())
+            .filter((name: string) => name.length > 0);
           logger.log('Blacklist updated (new format):', this.blacklist);
         }
         // Old format fallback
@@ -141,8 +194,8 @@ class SlackScraper {
         logger.log('Loading blacklist from new format (text)');
         this.blacklist = result.blacklistText
           .split(',')
-          .map(name => name.trim().toLowerCase())
-          .filter(name => name.length > 0);
+          .map((name: string) => name.trim().toLowerCase())
+          .filter((name: string) => name.length > 0);
       } else {
         // Try old format for backwards compatibility
         const oldResult = await chrome.storage.local.get(['workspaceBlacklists']);
@@ -210,17 +263,6 @@ class SlackScraper {
         this.messageAllUsersInPage(messageContent);
         sendResponse({ success: true });
       } else if (message.action === 'keepalive') {
-        // Keepalive ping from background script - helps keep extension active and responsive
-        logger.log('Received keepalive ping from background script');
-
-        // Update the background script that this tab is alive
-        chrome.storage.local.get(['activeMessagingTab'], (result) => {
-          if (result.activeMessagingTab) {
-            // We're supposed to be messaging, make sure we're responsive
-            logger.log('Tab is active for messaging');
-          }
-        });
-
         sendResponse({ success: true });
       } else if (message.action === 'nudgeMessaging') {
         // Nudge from background script to continue messaging despite throttling
@@ -240,11 +282,7 @@ class SlackScraper {
         // Clear active messaging tab when hidden
         chrome.storage.local.remove(['activeMessagingTab']);
       } else {
-        logger.log('Tab is now visible/active - checking sort order...');
-        // Check and fix sort order when tab becomes visible
-        this.ensureSortIsAtoZ().catch(error => {
-          logger.error('Error checking sort on visibility change:', error);
-        });
+        logger.log('Tab is now visible/active');
       }
     });
   }
@@ -259,9 +297,6 @@ class SlackScraper {
       }
 
       this.sendClickStatus('Starting to message all users...');
-
-      // Ensure sort is set to "A to Z" before starting
-      await this.ensureSortIsAtoZ();
 
       const userCells = document.getElementsByClassName("p-explorer_grid__cell");
       if (userCells.length === 0) {
@@ -278,10 +313,6 @@ class SlackScraper {
           await new Promise(resolve => setTimeout(resolve, 1000)); // Check pause state every second
         }
 
-        // Periodically check if sort has reset (every 5 users)
-        if (i % 5 === 0) {
-          await this.ensureSortIsAtoZ();
-        }
         const userCell = userCells[i] as HTMLElement;
         this.sendClickStatus(`Messaging user ${i + 1} of ${userCells.length}...`);
         logger.log(`Clicking user ${i + 1}:`, userCell);
@@ -341,38 +372,62 @@ class SlackScraper {
 
             logger.log(`BLACKLIST USERS:`, this.blacklist);
             const isBlacklisted = this.blacklist.includes(memberName.toLowerCase());
-            logger.log(`Is "${memberName}" blacklisted? ${isBlacklisted}`);
-
-            if (regex.test(memberName) && !isBlacklisted) {
-              logger.log('Found ql-editor, pasting message...');
-              qlEditor.focus(); // Focus the editor to ensure it's ready for input
-              document.execCommand('insertText', false, messageContent); // Paste the message
-              // For complex content or if execCommand fails, you might need to simulate keyboard input
-              await new Promise(resolve => setTimeout(resolve, 1000));
-              const sendButton = await this.waitForElement(".c-wysiwyg_container__button--send");
-              if (sendButton) {
-                logger.log('Clicking send button:', sendButton);
-                sendButton.click();
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Still need a short wait on DM page
-                logger.log('Navigating back...');
-
-                history.back();
-                await this.waitForElement(".p-explorer_grid__cell"); // Wait for user list to reappear
-              } else {
-                logger.warn('send button not found on DM page.');
-                history.back();
-                await this.waitForElement(".p-explorer_grid__cell");
-              }
-            } else {
-              logger.log('User is blacklisted or name regex test failed, skipping...');
+            if (isBlacklisted) {
+              logger.log(`User "${memberName}" is blacklisted, skipping...`);
+              this.sendClickStatus(`Skipped user ${i + 1} - blacklisted`);
               history.back();
               await this.waitForElement(".p-explorer_grid__cell"); // Wait for user list to reappear
+              continue;
+            }
+
+            if (regex.test(memberName)) {
+              console.log('Found ql-editor, pasting message...');
+              logger.log('Found ql-editor, pasting message...');
+              const hasExistingMessages = await this.checkForExistingMessages();
+
+              if (hasExistingMessages) {
+                console.log('Skipping user - existing conversation found with:', memberName);
+                this.sendClickStatus(`Skipped user ${i + 1} - already has messages`);
+                history.back();
+                await this.waitForElement(".p-explorer_grid__cell"); // Wait for user list to reappear
+                continue;
+              } else {
+                console.log('No existing messages, sending message to:', memberName);
+                logger.log('No existing messages, sending message to:', memberName);
+                qlEditor.focus(); // Focus the editor to ensure it's ready for input
+                document.execCommand('insertText', false, `Hello ${memberName}, ${messageContent}`); // Paste the message
+                // qlEditor.textContent = messageContent;
+                // For complex content or if execCommand fails, you might need to simulate keyboard input
+                await new Promise(resolve => setTimeout(resolve, 1000));
+                const sendButton = await this.waitForElement(".c-wysiwyg_container__button--send");
+                if (sendButton) {
+                  logger.log('Clicking send button:', sendButton);
+                  sendButton.click();
+                  await new Promise(resolve => setTimeout(resolve, 1000)); // Still need a short wait on DM page
+                  logger.log('Navigating back...');
+                  history.back();
+                  await this.waitForElement(".p-explorer_grid__cell"); // Wait for user list to reappear
+                  continue;
+                } else {
+                  logger.warn('send button not found on DM page.');
+                  history.back();
+                  await this.waitForElement(".p-explorer_grid__cell");
+                  continue;
+                }
+              }
+            } else {
+              logger.log(`User name is not valid, skipping...`);
+              this.sendClickStatus(`Skipped user ${i + 1} - not valid`);
+              history.back();
+              await this.waitForElement(".p-explorer_grid__cell"); // Wait for user list to reappear
+              continue;
             }
           } catch (error) {
             logger.error('Error processing user message:', error);
             this.sendClickStatus(`Error processing user ${i + 1}: ${(error as Error).message}`);
             history.back();
             await this.waitForElement(".p-explorer_grid__cell");
+            continue;
           }
         } else {
           logger.warn('"Message" button not found for user.');
@@ -390,36 +445,11 @@ class SlackScraper {
       logger.log('Waiting for next page button to be enabled...');
       let nextPageButton = await this.waitForElementEnabled('[data-qa="c-pagination_forward_btn"]', 10000); // Wait up to 10 seconds for button to be enabled
 
-      // If button not found, check if sort changed and fix it, then retry
-      if (!nextPageButton) {
-        logger.log('Next page button not found. Checking if sort changed...');
-        this.sendClickStatus('Next button not found, checking sort order...');
-
-        // Check and ensure sort is "A to Z"
-        const sortButton = document.getElementById('sort-explorer-select') as HTMLElement;
-        if (sortButton) {
-          const sortStatusSpan = sortButton.querySelector('span') as HTMLElement;
-          const currentSort = sortStatusSpan?.textContent?.trim() || '';
-          logger.log(`Current sort: "${currentSort}"`);
-
-          if (currentSort !== 'A to Z') {
-            logger.log('Sort is not "A to Z", fixing it...');
-            this.sendClickStatus('Fixing sort order...');
-            await this.ensureSortIsAtoZ();
-
-            // Retry finding the next page button after fixing sort
-            logger.log('Retrying to find next page button after sort fix...');
-            nextPageButton = await this.waitForElementEnabled('[data-qa="c-pagination_forward_btn"]', 10000);
-          }
-        }
-      }
-
       if (nextPageButton) {
         this.sendClickStatus('Navigating to next page...');
         logger.log('Clicking next page button:', nextPageButton);
         nextPageButton.click();
         await this.waitForElement(".p-explorer_grid__cell"); // Wait for new page's user list to load
-        await this.ensureSortIsAtoZ(); // Ensure sort is maintained after pagination
         // Continue messaging on next page
         this.messageAllUsersInPage(messageContent);
       } else {
@@ -506,49 +536,6 @@ class SlackScraper {
       });
     });
   }
-
-  private async ensureSortIsAtoZ() {
-    try {
-      const sortButton = document.getElementById('sort-explorer-select') as HTMLElement;
-      if (!sortButton) {
-        logger.warn('Sort button not found');
-        return;
-      }
-
-      // Get the first span child which contains the sort status
-      const sortStatusSpan = sortButton.querySelector('span') as HTMLElement;
-      const currentSort = sortStatusSpan?.textContent?.trim() || '';
-
-      logger.log(`Current sort status: "${currentSort}"`);
-
-      // Check if it's already "A to Z"
-      if (currentSort === 'A to Z') {
-        logger.log('Sort is already set to "A to Z", no need to change');
-        return;
-      }
-
-      logger.log('Sort is not "A to Z", updating to "A to Z"...');
-
-      // Click the sort button to open the dropdown
-      sortButton.click();
-      await new Promise(resolve => setTimeout(resolve, 500)); // Wait for dropdown to appear
-
-      // Click the "A to Z" option (option_1)
-      const sortOption = document.getElementById('sort-explorer-select_option_1') as HTMLElement;
-      if (sortOption) {
-        logger.log('Clicking "A to Z" sort option');
-        sortOption.click();
-        logger.log('Waiting for user list to re-sort...');
-        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait for list to re-sort and render
-        logger.log('Sort updated to "A to Z", user list is ready');
-      } else {
-        logger.warn('"A to Z" sort option not found');
-      }
-    } catch (error) {
-      logger.error('Error ensuring sort is A to Z:', error);
-    }
-  }
-
 
   private startScraping() {
     this.isActive = true;

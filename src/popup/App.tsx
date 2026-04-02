@@ -10,6 +10,8 @@ const App: React.FC = () => {
   const [blacklistText, setBlacklistText] = useState<string>("");
   const [isPaused, setIsPaused] = useState<boolean>(false);
 
+
+
   useEffect(() => {
     const currentUrl = window.location.origin;
 
@@ -36,6 +38,7 @@ const App: React.FC = () => {
       if (typeof result.isPaused === 'boolean') {
         setIsPaused(result.isPaused);
       }
+      // sort option removed
     });
 
     // Listen for user messaged updates from the content script
@@ -81,39 +84,38 @@ const App: React.FC = () => {
     chrome.storage.local.set({ messageContent });
   }, [messageContent]);
 
-  const handleMessageAllUsers = async () => {
-    // Query all tabs to find Slack instances
-    const allTabs = await chrome.tabs.query({});
-    const slackTabs = allTabs.filter(tab => tab.url && tab.url.includes('slack.com'));
 
-    if (slackTabs.length === 0) {
-      alert('No Slack tabs found. Please open at least one Slack workspace.');
+
+  const handleMessageAllUsers = async () => {
+    // Send message only to the active Slack tab
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+    if (!activeTab || !activeTab.url || !activeTab.url.includes("slack.com") || !activeTab.id) {
+      alert("Active tab is not a Slack workspace. Please focus a Slack tab and try again.");
       return;
     }
 
-    // Send message to all Slack tabs in parallel
-    const promises = slackTabs.map(tab =>
-      new Promise((resolve) => {
-        if (tab.id) {
-          chrome.tabs.sendMessage(
-            tab.id,
-            { action: 'messageAllUsers', content: messageContent },
-            (response) => {
-              resolve({ tabId: tab.id, url: tab.url, response });
-            }
-          );
-        }
-      })
-    );
+    await new Promise<void>((resolve, reject) => {
+      chrome.tabs.sendMessage(
+        activeTab.id as number,
+        { action: "messageAllUsers", content: messageContent },
+        (response) => {
+          if (chrome.runtime.lastError) {
+            console.error("Error sending message to active Slack tab:", chrome.runtime.lastError.message);
+            alert("Could not connect to the active Slack tab. Please make sure the extension is allowed on this page and try again.");
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
 
-    try {
-      const results = await Promise.all(promises);
-      console.log('Messaging started on all Slack tabs:', results);
-      alert(`Started messaging on ${slackTabs.length} Slack workspace(s)`);
-    } catch (error) {
-      console.error('Error sending messages to tabs:', error);
-      alert('Error starting messaging on some Slack tabs');
-    }
+          console.log("Messaging started on active Slack tab:", {
+            tabId: activeTab.id,
+            url: activeTab.url,
+            response,
+          });
+          resolve();
+        }
+      );
+    });
   };
 
   const handlePauseResume = () => {
@@ -212,6 +214,10 @@ const App: React.FC = () => {
               <p>Last Messaged User: <strong>{lastMessagedUser}</strong></p>
             </div>
           )}
+
+
+
+
 
           <div className="textarea-group">
             <label className="textarea-label">Message Content</label>
