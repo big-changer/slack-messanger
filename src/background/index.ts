@@ -1,5 +1,6 @@
 // Background script for Chrome extension
 let keepaliveInterval: NodeJS.Timeout | null = null;
+const KEEPALIVE_ALARM_NAME = 'slack-messaging-keepalive';
 
 // Timestamp helper
 function getTimestamp(): string {
@@ -17,6 +18,7 @@ chrome.runtime.onInstalled.addListener(() => {
   // Initialize storage
   chrome.storage.local.set({
     isActive: false,
+    sendToExistingDm: false,
     slackData: {
       messages: [],
       channels: [],
@@ -41,9 +43,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Return the sender's tab ID
     sendResponse({ tabId: sender.tab?.id });
     return;
+  } else if (message.action === 'ensureTabAwake') {
+    ensureTabAwake(sender.tab?.id).then((result) => {
+      sendResponse(result);
+    }).catch((error) => {
+      console.error(`BG:DEBUG ${getTimestamp()} Error waking tab:`, error);
+      sendResponse({ success: false, error: String(error) });
+    });
+    return true;
   }
 
   sendResponse({ success: true });
+});
+
+chrome.runtime.onStartup.addListener(() => {
+  startKeepalive();
+});
+
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM_NAME) {
+    pingSlackTabs().catch((error) => {
+      console.error(`BG:DEBUG ${getTimestamp()} Error during keepalive alarm:`, error);
+    });
+  }
 });
 
 // Handle extension icon click
@@ -70,6 +92,31 @@ async function handleBackgroundMessaging(tabId?: number) {
   }
 }
 
+async function ensureTabAwake(tabId?: number) {
+  if (!tabId) {
+    return { success: false, error: 'No tab id available' };
+  }
+
+  const tab = await chrome.tabs.get(tabId);
+  if (tab.windowId !== undefined) {
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => undefined);
+  }
+
+  await chrome.tabs.update(tabId, { active: true }).catch(() => undefined);
+  return { success: true };
+}
+
+async function pingSlackTabs() {
+  const tabs = await chrome.tabs.query({ url: '*://*.slack.com/*' });
+  tabs.forEach((tab) => {
+    if (tab.id) {
+      chrome.tabs.sendMessage(tab.id, { action: 'keepalive' }).catch(() => {
+        // Tab might be closed or content script not ready, ignore
+      });
+    }
+  });
+}
+
 // Start aggressive keepalive mechanism
 function startKeepalive() {
   // Send keepalive pings every 2 seconds to all Slack tabs (more aggressive)
@@ -77,20 +124,12 @@ function startKeepalive() {
     clearInterval(keepaliveInterval);
   }
 
-  keepaliveInterval = setInterval(async () => {
-    try {
-      const tabs = await chrome.tabs.query({ url: '*://*.slack.com/*' });
-      tabs.forEach((tab) => {
-        if (tab.id) {
-          // Send keepalive to keep content script active
-          chrome.tabs.sendMessage(tab.id, { action: 'keepalive' }).catch(() => {
-            // Tab might be closed or content script not ready, ignore
-          });
-        }
-      });
-    } catch (error) {
+  chrome.alarms.create(KEEPALIVE_ALARM_NAME, { periodInMinutes: 0.5 });
+
+  keepaliveInterval = setInterval(() => {
+    pingSlackTabs().catch((error) => {
       console.error(`BG:DEBUG ${getTimestamp()} Error sending keepalive:`, error);
-    }
+    });
   }, 2000); // More aggressive - every 2 seconds instead of 5
 }
 

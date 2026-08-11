@@ -5,8 +5,10 @@
   "description": "A Chrome extension for Slack scraping built with TypeScript and React",
   "permissions": [
     "activeTab",
+    "alarms",
     "storage",
-    "scripting"
+    "scripting",
+    "tabs"
   ],
   "host_permissions": [
     "https://*.slack.com/*"

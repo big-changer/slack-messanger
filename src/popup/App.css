@@ -338,6 +338,24 @@
   width: 100%;
 }
 
+.toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #2c2d30;
+  line-height: 1.3;
+}
+
+.toggle-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #007a5a;
+  flex: 0 0 auto;
+}
+
 .message-all-btn {
   flex: 2;
 }
@@ -370,6 +388,82 @@
 .pause-resume-btn.resumed:hover {
   background: #ea580c;
   transform: translateY(-1px);
+}
+
+.messaging-status-panel {
+  border: 1px solid #ddd;
+  border-left: 4px solid #616061;
+  border-radius: 6px;
+  background: white;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.messaging-status-panel.running {
+  border-left-color: #007a5a;
+  background: #f4fbf8;
+}
+
+.messaging-status-panel.waiting {
+  border-left-color: #f59e0b;
+  background: #fffbeb;
+}
+
+.messaging-status-panel.paused {
+  border-left-color: #f97316;
+  background: #fff7ed;
+}
+
+.messaging-status-panel.completed {
+  border-left-color: #2eb67d;
+  background: #f0fdf4;
+}
+
+.messaging-status-panel.error {
+  border-left-color: #e01e5a;
+  background: #fff1f2;
+}
+
+.messaging-status-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+}
+
+.messaging-status-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #2c2d30;
+  text-transform: uppercase;
+}
+
+.messaging-status-time {
+  font-size: 11px;
+  color: #616061;
+  white-space: nowrap;
+}
+
+.messaging-status-position {
+  font-size: 14px;
+  font-weight: 700;
+  color: #4a154b;
+}
+
+.messaging-status-user {
+  font-size: 13px;
+  font-weight: 600;
+  color: #2c2d30;
+  overflow-wrap: anywhere;
+}
+
+.messaging-status-text {
+  font-size: 12px;
+  color: #616061;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 
 .sort-option-section {

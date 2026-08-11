@@ -1,6 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import './App.css';
 
+type MessagingPhase = 'idle' | 'running' | 'paused' | 'waiting' | 'completed' | 'error';
+
+interface MessagingStatus {
+  phase: MessagingPhase;
+  status: string;
+  pageNumber?: number;
+  userIndex?: number;
+  totalUsers?: number;
+  userName?: string;
+  reason?: string;
+  updatedAt: number;
+}
+
 const App: React.FC = () => {
   const [messageContent, setMessageContent] = useState<string>("Hello, How are you doing?");
   const [lastMessagedUser, setLastMessagedUser] = useState<string>("");
@@ -9,6 +22,12 @@ const App: React.FC = () => {
   const [blacklist, setBlacklist] = useState<string[]>([]);
   const [blacklistText, setBlacklistText] = useState<string>("");
   const [isPaused, setIsPaused] = useState<boolean>(false);
+  const [sendToExistingDm, setSendToExistingDm] = useState<boolean>(false);
+  const [messagingStatus, setMessagingStatus] = useState<MessagingStatus>({
+    phase: 'idle',
+    status: 'Idle',
+    updatedAt: Date.now(),
+  });
 
 
 
@@ -16,7 +35,7 @@ const App: React.FC = () => {
     const currentUrl = window.location.origin;
 
     // Load last messaged users, message content, blacklist, and pause state from Chrome storage
-    chrome.storage.local.get(['lastMessagedUsers', 'blacklistText', 'messageContent', 'isPaused'], (result) => {
+    chrome.storage.local.get(['lastMessagedUsers', 'blacklistText', 'messageContent', 'isPaused', 'messagingStatus', 'sendToExistingDm'], (result) => {
       if (result.lastMessagedUsers) {
         const lastUser = result.lastMessagedUsers[currentUrl] || '';
         setLastMessagedUser(lastUser);
@@ -37,6 +56,12 @@ const App: React.FC = () => {
       // Load pause state
       if (typeof result.isPaused === 'boolean') {
         setIsPaused(result.isPaused);
+      }
+      if (result.messagingStatus) {
+        setMessagingStatus(result.messagingStatus);
+      }
+      if (typeof result.sendToExistingDm === 'boolean') {
+        setSendToExistingDm(result.sendToExistingDm);
       }
       // sort option removed
     });
@@ -68,6 +93,23 @@ const App: React.FC = () => {
             });
           }
         });
+      } else if (message.action === 'updateClickStatus') {
+        if (message.messagingStatus) {
+          setMessagingStatus(message.messagingStatus);
+          if (message.messagingStatus.phase === 'paused') {
+            setIsPaused(true);
+          } else if (message.messagingStatus.reason !== 'manual') {
+            chrome.storage.local.get(['isPaused'], (result) => {
+              setIsPaused(Boolean(result.isPaused));
+            });
+          }
+        } else if (message.status) {
+          setMessagingStatus({
+            phase: 'running',
+            status: message.status,
+            updatedAt: Date.now(),
+          });
+        }
       }
       sendResponse();
     };
@@ -77,6 +119,23 @@ const App: React.FC = () => {
     return () => {
       chrome.runtime.onMessage.removeListener(messageListener);
     };
+  }, []);
+
+  useEffect(() => {
+    const storageListener = (changes: { [key: string]: chrome.storage.StorageChange }) => {
+      if (changes.messagingStatus?.newValue) {
+        setMessagingStatus(changes.messagingStatus.newValue);
+      }
+      if (typeof changes.isPaused?.newValue === 'boolean') {
+        setIsPaused(changes.isPaused.newValue);
+      }
+      if (typeof changes.sendToExistingDm?.newValue === 'boolean') {
+        setSendToExistingDm(changes.sendToExistingDm.newValue);
+      }
+    };
+
+    chrome.storage.onChanged.addListener(storageListener);
+    return () => chrome.storage.onChanged.removeListener(storageListener);
   }, []);
 
   // Persist message content to storage whenever it changes
@@ -139,6 +198,68 @@ const App: React.FC = () => {
           });
         }
       });
+    });
+  };
+
+  const handleSendToExistingDmChange = (checked: boolean) => {
+    setSendToExistingDm(checked);
+    chrome.storage.local.set({ sendToExistingDm: checked });
+  };
+
+  const getPauseResumeLabel = () => {
+    if (isPaused || messagingStatus.phase === 'paused') {
+      return 'Resume';
+    }
+
+    if (messagingStatus.phase === 'waiting') {
+      return 'Pause';
+    }
+
+    return 'Pause';
+  };
+
+  const getStatusTitle = () => {
+    if (isPaused || messagingStatus.phase === 'paused') {
+      return 'Paused';
+    }
+
+    if (messagingStatus.phase === 'waiting') {
+      return 'Waiting';
+    }
+
+    if (messagingStatus.phase === 'completed') {
+      return 'Completed';
+    }
+
+    if (messagingStatus.phase === 'error') {
+      return 'Needs Attention';
+    }
+
+    if (messagingStatus.phase === 'running') {
+      return 'Running';
+    }
+
+    return 'Idle';
+  };
+
+  const getPositionText = () => {
+    const pageText = messagingStatus.pageNumber ? `Page ${messagingStatus.pageNumber}` : 'Page -';
+    const userText = messagingStatus.userIndex && messagingStatus.totalUsers
+      ? `User ${messagingStatus.userIndex} of ${messagingStatus.totalUsers}`
+      : 'User -';
+
+    return `${pageText} / ${userText}`;
+  };
+
+  const getUpdatedText = () => {
+    if (!messagingStatus.updatedAt) {
+      return '';
+    }
+
+    return new Date(messagingStatus.updatedAt).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
     });
   };
 
@@ -235,8 +356,29 @@ const App: React.FC = () => {
               Send All Messages
             </button>
             <button className={`action-btn pause-resume-btn ${isPaused ? 'resumed' : 'paused'}`} onClick={handlePauseResume}>
-              {isPaused ? 'Resume' : 'Pause'}
+              {getPauseResumeLabel()}
             </button>
+          </div>
+
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={sendToExistingDm}
+              onChange={(e) => handleSendToExistingDmChange(e.target.checked)}
+            />
+            <span>Send even if DM has old messages</span>
+          </label>
+
+          <div className={`messaging-status-panel ${messagingStatus.phase}`}>
+            <div className="messaging-status-header">
+              <span className="messaging-status-title">{getStatusTitle()}</span>
+              <span className="messaging-status-time">{getUpdatedText()}</span>
+            </div>
+            <div className="messaging-status-position">{getPositionText()}</div>
+            {messagingStatus.userName && (
+              <div className="messaging-status-user">{messagingStatus.userName}</div>
+            )}
+            <div className="messaging-status-text">{messagingStatus.status}</div>
           </div>
         </div>
 
