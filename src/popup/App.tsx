@@ -23,6 +23,7 @@ const App: React.FC = () => {
   const [blacklistText, setBlacklistText] = useState<string>("");
   const [isPaused, setIsPaused] = useState<boolean>(false);
   const [sendToExistingDm, setSendToExistingDm] = useState<boolean>(false);
+  const [keepTabFocused, setKeepTabFocused] = useState<boolean>(false);
   const [messagingStatus, setMessagingStatus] = useState<MessagingStatus>({
     phase: 'idle',
     status: 'Idle',
@@ -35,7 +36,7 @@ const App: React.FC = () => {
     const currentUrl = window.location.origin;
 
     // Load last messaged users, message content, blacklist, and pause state from Chrome storage
-    chrome.storage.local.get(['lastMessagedUsers', 'blacklistText', 'messageContent', 'isPaused', 'messagingStatus', 'sendToExistingDm'], (result) => {
+    chrome.storage.local.get(['lastMessagedUsers', 'blacklistText', 'messageContent', 'isPaused', 'messagingStatus', 'sendToExistingDm', 'keepTabFocused'], (result) => {
       if (result.lastMessagedUsers) {
         const lastUser = result.lastMessagedUsers[currentUrl] || '';
         setLastMessagedUser(lastUser);
@@ -62,6 +63,9 @@ const App: React.FC = () => {
       }
       if (typeof result.sendToExistingDm === 'boolean') {
         setSendToExistingDm(result.sendToExistingDm);
+      }
+      if (typeof result.keepTabFocused === 'boolean') {
+        setKeepTabFocused(result.keepTabFocused);
       }
       // sort option removed
     });
@@ -131,6 +135,9 @@ const App: React.FC = () => {
       }
       if (typeof changes.sendToExistingDm?.newValue === 'boolean') {
         setSendToExistingDm(changes.sendToExistingDm.newValue);
+      }
+      if (typeof changes.keepTabFocused?.newValue === 'boolean') {
+        setKeepTabFocused(changes.keepTabFocused.newValue);
       }
     };
 
@@ -204,6 +211,11 @@ const App: React.FC = () => {
   const handleSendToExistingDmChange = (checked: boolean) => {
     setSendToExistingDm(checked);
     chrome.storage.local.set({ sendToExistingDm: checked });
+  };
+
+  const handleKeepTabFocusedChange = (checked: boolean) => {
+    setKeepTabFocused(checked);
+    chrome.storage.local.set({ keepTabFocused: checked });
   };
 
   const getPauseResumeLabel = () => {
@@ -367,6 +379,15 @@ const App: React.FC = () => {
               onChange={(e) => handleSendToExistingDmChange(e.target.checked)}
             />
             <span>Send even if DM has old messages</span>
+          </label>
+
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={keepTabFocused}
+              onChange={(e) => handleKeepTabFocusedChange(e.target.checked)}
+            />
+            <span>Keep Slack tab in front while sending (steals window focus)</span>
           </label>
 
           <div className={`messaging-status-panel ${messagingStatus.phase}`}>

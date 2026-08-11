@@ -19,6 +19,7 @@ chrome.runtime.onInstalled.addListener(() => {
   chrome.storage.local.set({
     isActive: false,
     sendToExistingDm: false,
+    keepTabFocused: false,
     slackData: {
       messages: [],
       channels: [],

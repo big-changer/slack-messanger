@@ -59,6 +59,7 @@ class SlackScraper {
   private messagingRunId: number = 0;
   private processedUsers: Set<string> = new Set();
   private sendToExistingDm: boolean = false;
+  private keepTabFocused: boolean = false;
 
   // Utility function to wait for an element to appear in the DOM
   private async waitForElement(selector: string, timeout = 100000, interval = 250): Promise<HTMLElement | null> {
@@ -117,6 +118,11 @@ class SlackScraper {
 
   private async ensureAutomationReady(reason: string): Promise<void> {
     await this.waitUntilOnline();
+
+    // Only pull the Slack tab/window to the foreground when the user opted in.
+    if (!this.keepTabFocused) {
+      return;
+    }
 
     if (document.hidden || !document.hasFocus()) {
       logger.log(`Requesting tab wake before ${reason}`);
@@ -245,12 +251,18 @@ class SlackScraper {
     this.loadBlacklist();
     this.loadPauseState();
     this.loadSendToExistingDm();
+    this.loadKeepTabFocused();
     // Listen for blacklist updates from storage
     chrome.storage.onChanged.addListener((changes) => {
       try {
         if (typeof changes.sendToExistingDm?.newValue === 'boolean') {
           this.sendToExistingDm = changes.sendToExistingDm.newValue;
           logger.log(`Send to existing DMs setting updated: ${this.sendToExistingDm}`);
+        }
+
+        if (typeof changes.keepTabFocused?.newValue === 'boolean') {
+          this.keepTabFocused = changes.keepTabFocused.newValue;
+          logger.log(`Keep tab focused setting updated: ${this.keepTabFocused}`);
         }
 
         // New format: blacklistText
@@ -363,6 +375,19 @@ class SlackScraper {
     } catch (error) {
       logger.error('Error loading send to existing DMs setting:', error);
       this.sendToExistingDm = false;
+    }
+  }
+
+  private async loadKeepTabFocused() {
+    try {
+      const result = await chrome.storage.local.get(['keepTabFocused']);
+      if (typeof result.keepTabFocused === 'boolean') {
+        this.keepTabFocused = result.keepTabFocused;
+      }
+      logger.log(`Loaded keep tab focused setting: ${this.keepTabFocused}`);
+    } catch (error) {
+      logger.error('Error loading keep tab focused setting:', error);
+      this.keepTabFocused = false;
     }
   }
 
