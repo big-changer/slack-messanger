@@ -532,6 +532,19 @@ class SlackScraper {
           continue;
         }
 
+        if (!regex.test(userCellLabel)) {
+          logger.log(`Skipping user "${userCellLabel}" - name is not English, Japanese, or Chinese.`);
+          this.sendClickStatus(`${this.getStatusPrefix(pageNumber, i + 1, usersOnPage)} - Skipped ${userCellLabel}, unsupported name script.`, {
+            phase: 'running',
+            pageNumber,
+            userIndex: i + 1,
+            totalUsers: usersOnPage,
+            userName: userCellLabel,
+          });
+          this.processedUsers.add(this.getMemberKey(userCellLabel));
+          continue;
+        }
+
         this.sendClickStatus(`${this.getStatusPrefix(pageNumber, i + 1, usersOnPage)} - Opening user...`, {
           phase: 'running',
           pageNumber,
