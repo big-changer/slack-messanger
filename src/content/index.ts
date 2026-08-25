@@ -46,6 +46,8 @@ interface MessagingStatus {
   updatedAt: number;
 }
 
+type MessagingStatusDetails = Partial<Omit<MessagingStatus, 'status' | 'updatedAt'>>;
+
 const regex = /^[a-zA-Z0-9\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF!@#\$%\^&\*\(\)_\+\-=\[\]\{\};:'",\.<>\/\?\\|`~ ]*$/;
 
 class SlackScraper {
@@ -60,6 +62,7 @@ class SlackScraper {
   private processedUsers: Set<string> = new Set();
   private sendToExistingDm: boolean = false;
   private keepTabFocused: boolean = false;
+  private lastRunningStatus: { status: string; details: MessagingStatusDetails } | null = null;
 
   // Utility function to wait for an element to appear in the DOM
   private async waitForElement(selector: string, timeout = 100000, interval = 250): Promise<HTMLElement | null> {
@@ -114,6 +117,7 @@ class SlackScraper {
       reason: 'slack-recovery',
     });
     await this.sleep(3000);
+    this.restoreRunningStatus();
   }
 
   private async ensureAutomationReady(reason: string): Promise<void> {
@@ -138,6 +142,10 @@ class SlackScraper {
       await this.waitUntilOnline();
       const element = await this.waitForElement(selector, timeout);
       if (element) {
+        if (attempt > 1) {
+          // Clear the 'waiting' status left by the failed attempts.
+          this.restoreRunningStatus();
+        }
         return element;
       }
 
@@ -263,6 +271,12 @@ class SlackScraper {
         if (typeof changes.keepTabFocused?.newValue === 'boolean') {
           this.keepTabFocused = changes.keepTabFocused.newValue;
           logger.log(`Keep tab focused setting updated: ${this.keepTabFocused}`);
+        }
+
+        // Fallback path for pause/resume: storage always reaches every Slack tab,
+        // even when the popup's tabs.sendMessage broadcast does not.
+        if (typeof changes.isPaused?.newValue === 'boolean') {
+          this.setPaused(changes.isPaused.newValue, false);
         }
 
         // New format: blacklistText
@@ -404,6 +418,8 @@ class SlackScraper {
         sendResponse({ success: true });
       } else if (message.action === 'messageAllUsers') {
         const messageContent = message.content || ""; // Get message content from popup
+        // A new run must never inherit a stale paused state, or it stalls immediately.
+        this.setPaused(false);
         this.messageAllUsersInPage(messageContent);
         sendResponse({ success: true });
       } else if (message.action === 'keepalive') {
@@ -413,12 +429,7 @@ class SlackScraper {
         logger.log('Received nudge to continue messaging');
         sendResponse({ success: true });
       } else if (message.action === 'togglePause') {
-        this.isPaused = message.isPaused;
-        logger.log(`Messaging ${this.isPaused ? 'paused' : 'resumed'}`);
-        this.sendClickStatus(this.isPaused ? 'Paused by user.' : 'Resumed by user.', {
-          phase: this.isPaused ? 'paused' : 'running',
-          reason: this.isPaused ? 'manual' : undefined,
-        });
+        this.setPaused(Boolean(message.isPaused));
         sendResponse({ success: true });
       }
     });
@@ -426,15 +437,12 @@ class SlackScraper {
     // Listen for visibility changes to handle tab going inactive/active
     document.addEventListener('visibilitychange', () => {
       if (document.hidden) {
+        // Log only. A hidden tab is not a stalled run, so don't overwrite the
+        // status panel with a 'waiting' phase that reads as "stopped" to the user.
         logger.log('Tab is now hidden/inactive');
-        if (this.isMessaging) {
-          this.sendClickStatus('Slack tab is hidden. Continuing with background recovery enabled...', {
-            phase: 'waiting',
-            reason: 'hidden-tab',
-          });
-        }
       } else {
         logger.log('Tab is now visible/active');
+        this.restoreRunningStatus();
       }
     });
   }
@@ -487,6 +495,11 @@ class SlackScraper {
 
         // Check if paused - wait until resumed
         while (this.isPaused) {
+          if (runId !== this.messagingRunId) {
+            logger.warn('A newer messaging run started while paused; stopping older run.');
+            return;
+          }
+
           this.sendClickStatus(`${this.getStatusPrefix(pageNumber, i + 1, usersOnPage)} - Paused by user.`, {
             phase: 'paused',
             pageNumber,
@@ -829,7 +842,7 @@ class SlackScraper {
     }
   }
 
-  private sendClickStatus(status: string, details: Partial<Omit<MessagingStatus, 'status' | 'updatedAt'>> = {}) {
+  private sendClickStatus(status: string, details: MessagingStatusDetails = {}) {
     const messagingStatus: MessagingStatus = {
       phase: details.phase || 'running',
       ...details,
@@ -837,8 +850,42 @@ class SlackScraper {
       updatedAt: Date.now(),
     };
 
+    // Remember the last real progress line so transient 'waiting' states can be
+    // rolled back instead of leaving the popup stuck on a stale status.
+    if (messagingStatus.phase === 'running') {
+      this.lastRunningStatus = { status, details };
+    }
+
     chrome.storage.local.set({ messagingStatus });
     chrome.runtime.sendMessage({ action: 'updateClickStatus', status, messagingStatus });
+  }
+
+  // Re-emit the last real progress line after a transient wait resolves.
+  private restoreRunningStatus() {
+    if (!this.isMessaging || this.isPaused || !this.lastRunningStatus) {
+      return;
+    }
+
+    this.sendClickStatus(this.lastRunningStatus.status, this.lastRunningStatus.details);
+  }
+
+  // Single entry point for pause state so the message and storage paths agree.
+  private setPaused(next: boolean, persist = true) {
+    if (this.isPaused === next) {
+      return;
+    }
+
+    this.isPaused = next;
+    logger.log(`Messaging ${next ? 'paused' : 'resumed'}`);
+
+    if (persist) {
+      chrome.storage.local.set({ isPaused: next });
+    }
+
+    this.sendClickStatus(next ? 'Paused by user.' : 'Resumed by user.', {
+      phase: next ? 'paused' : 'running',
+      reason: next ? 'manual' : undefined,
+    });
   }
 
   // Helper method to get current tab ID

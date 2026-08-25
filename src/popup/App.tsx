@@ -193,8 +193,9 @@ const App: React.FC = () => {
       console.log(`Messaging ${newPausedState ? 'paused' : 'resumed'}`);
     });
 
-    // Notify all Slack tabs about pause state
-    chrome.tabs.query({ url: '*://app.slack.com/*' }, (tabs) => {
+    // Notify all Slack tabs about pause state. Storage is the reliable path (the
+    // content script syncs from it); this broadcast is just the instant one.
+    chrome.tabs.query({ url: '*://*.slack.com/*' }, (tabs) => {
       tabs.forEach(tab => {
         if (tab.id) {
           chrome.tabs.sendMessage(tab.id, {
